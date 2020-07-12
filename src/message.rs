@@ -1,6 +1,6 @@
 use termcolor::Color::{self, *};
 
-use super::{Expected, Test};
+use super::{Expected, TestSpec};
 use crate::diff::{Diff, Render};
 use crate::error::Error;
 use crate::normalize;
@@ -54,7 +54,7 @@ pub(crate) fn ok() {
     term::reset();
 }
 
-pub(crate) fn begin_test(test: &Test, show_expected: bool) {
+pub(crate) fn begin_test(test: &TestSpec, show_expected: bool) {
     let display_name = if show_expected {
         test.path
             .file_name()

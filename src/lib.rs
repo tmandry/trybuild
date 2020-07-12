@@ -237,11 +237,11 @@ pub struct TestCases {
 
 #[derive(Debug)]
 struct Runner {
-    tests: Vec<Test>,
+    tests: Vec<TestSpec>,
 }
 
 #[derive(Clone, Debug)]
-struct Test {
+struct TestSpec {
     path: PathBuf,
     expected: Expected,
 }
@@ -261,14 +261,14 @@ impl TestCases {
     }
 
     pub fn pass<P: AsRef<Path>>(&self, path: P) {
-        self.runner.borrow_mut().tests.push(Test {
+        self.runner.borrow_mut().tests.push(TestSpec {
             path: path.as_ref().to_owned(),
             expected: Expected::Pass,
         });
     }
 
     pub fn compile_fail<P: AsRef<Path>>(&self, path: P) {
-        self.runner.borrow_mut().tests.push(Test {
+        self.runner.borrow_mut().tests.push(TestSpec {
             path: path.as_ref().to_owned(),
             expected: Expected::CompileFail,
         });

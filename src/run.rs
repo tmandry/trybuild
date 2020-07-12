@@ -4,7 +4,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
-use super::{Expected, Runner, Test};
+use super::{Expected, Runner, TestSpec};
 use crate::cargo;
 use crate::dependencies::{self, Dependency};
 use crate::env::Update;
@@ -61,7 +61,7 @@ impl Runner {
         }
     }
 
-    fn prepare(&self, tests: &[ExpandedTest]) -> Result<Project> {
+    fn prepare(&self, tests: &[Test]) -> Result<Project> {
         let metadata = cargo::metadata()?;
         let target_dir = metadata.target_directory;
         let workspace = metadata.workspace_root;
@@ -71,7 +71,7 @@ impl Runner {
         let mut has_pass = false;
         let mut has_compile_fail = false;
         for e in tests {
-            match e.test.expected {
+            match e.spec.expected {
                 Expected::Pass => has_pass = true,
                 Expected::CompileFail => has_compile_fail = true,
             }
@@ -119,7 +119,7 @@ impl Runner {
         &self,
         crate_name: String,
         project: &Project,
-        tests: &[ExpandedTest],
+        tests: &[Test],
     ) -> Result<Manifest> {
         let source_manifest = dependencies::get_manifest(&project.source_dir);
         let workspace_manifest = dependencies::get_workspace_manifest(&project.workspace);
@@ -174,7 +174,7 @@ impl Runner {
             if expanded.error.is_none() {
                 manifest.bins.push(Bin {
                     name: expanded.name.clone(),
-                    path: project.source_dir.join(&expanded.test.path),
+                    path: project.source_dir.join(&expanded.spec.path),
                 });
             }
         }
@@ -191,7 +191,7 @@ impl Runner {
     }
 }
 
-impl Test {
+impl TestSpec {
     fn run(&self, project: &Project, name: &Name) -> Result<()> {
         let show_expected = project.has_pass && project.has_compile_fail;
         message::begin_test(self, show_expected);
@@ -210,8 +210,8 @@ impl Test {
         );
 
         let check = match self.expected {
-            Expected::Pass => Test::check_pass,
-            Expected::CompileFail => Test::check_compile_fail,
+            Expected::Pass => TestSpec::check_pass,
+            Expected::CompileFail => TestSpec::check_compile_fail,
         };
 
         check(self, project, name, success, stdout, stderr)
@@ -317,13 +317,13 @@ fn check_exists(path: &Path) -> Result<()> {
 }
 
 #[derive(Debug)]
-struct ExpandedTest {
+struct Test {
     name: Name,
-    test: Test,
+    spec: TestSpec,
     error: Option<Error>,
 }
 
-fn expand_globs(tests: &[Test]) -> Vec<ExpandedTest> {
+fn expand_globs(tests: &[TestSpec]) -> Vec<Test> {
     fn glob(pattern: &str) -> Result<Vec<PathBuf>> {
         let mut paths = glob::glob(pattern)?
             .map(|entry| entry.map_err(Error::from))
@@ -339,9 +339,9 @@ fn expand_globs(tests: &[Test]) -> Vec<ExpandedTest> {
     let mut vec = Vec::new();
 
     for test in tests {
-        let mut expanded = ExpandedTest {
+        let mut expanded = Test {
             name: bin_name(vec.len()),
-            test: test.clone(),
+            spec: test.clone(),
             error: None,
         };
         if let Some(utf8) = test.path.to_str() {
@@ -349,11 +349,11 @@ fn expand_globs(tests: &[Test]) -> Vec<ExpandedTest> {
                 match glob(utf8) {
                     Ok(paths) => {
                         for path in paths {
-                            vec.push(ExpandedTest {
+                            vec.push(Test {
                                 name: bin_name(vec.len()),
-                                test: Test {
+                                spec: TestSpec {
                                     path,
-                                    expected: expanded.test.expected,
+                                    expected: expanded.spec.expected,
                                 },
                                 error: None,
                             });
@@ -370,13 +370,13 @@ fn expand_globs(tests: &[Test]) -> Vec<ExpandedTest> {
     vec
 }
 
-impl ExpandedTest {
+impl Test {
     fn run(self, project: &Project) -> Result<()> {
         match self.error {
-            None => self.test.run(project, &self.name),
+            None => self.spec.run(project, &self.name),
             Some(error) => {
                 let show_expected = false;
-                message::begin_test(&self.test, show_expected);
+                message::begin_test(&self.spec, show_expected);
                 Err(error)
             }
         }
@@ -392,7 +392,7 @@ impl ExpandedTest {
 // Cargo to run the test at all. The next argument starting with `trybuild=`
 // provides a filename filter. Only test cases whose filename contains the
 // filter string will be run.
-fn filter(tests: &mut Vec<ExpandedTest>) {
+fn filter(tests: &mut Vec<Test>) {
     let filters = env::args_os()
         .flat_map(OsString::into_string)
         .filter_map(|mut arg| {
@@ -412,6 +412,6 @@ fn filter(tests: &mut Vec<ExpandedTest>) {
     tests.retain(|t| {
         filters
             .iter()
-            .any(|f| t.test.path.to_string_lossy().contains(f))
+            .any(|f| t.spec.path.to_string_lossy().contains(f))
     });
 }
