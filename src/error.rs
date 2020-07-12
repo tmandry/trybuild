@@ -1,5 +1,6 @@
 use glob::{GlobError, PatternError};
 use std::env;
+use std::error::Error as StdError;
 use std::ffi::OsString;
 use std::fmt::{self, Display};
 use std::io;
@@ -20,6 +21,7 @@ pub enum Error {
     ReadStderr(io::Error),
     RunFailed,
     ShouldNotHaveCompiled,
+    Strategy(Box<dyn StdError + 'static>),
     TomlDe(toml::de::Error),
     TomlSer(toml::ser::Error),
     UpdateVar(OsString),
@@ -48,6 +50,7 @@ impl Display for Error {
             ShouldNotHaveCompiled => {
                 write!(f, "expected test case to fail to compile, but it succeeded")
             }
+            Strategy(e) => write!(f, "{}", e),
             TomlDe(e) => write!(f, "{}", e),
             TomlSer(e) => write!(f, "{}", e),
             UpdateVar(var) => write!(
@@ -66,10 +69,19 @@ impl Error {
 
         match self {
             CargoFail | Mismatch | RunFailed | ShouldNotHaveCompiled => true,
+            Strategy(e) => {
+                if let Some(e) = e.downcast_ref::<Error>() {
+                    e.already_printed()
+                } else {
+                    false
+                }
+            }
             _ => false,
         }
     }
 }
+
+impl StdError for Error {}
 
 impl From<GlobError> for Error {
     fn from(err: GlobError) -> Self {
