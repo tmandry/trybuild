@@ -83,6 +83,15 @@ impl Error {
 
 impl StdError for Error {}
 
+impl From<Box<dyn StdError + 'static>> for Error {
+    fn from(err: Box<dyn StdError + 'static>) -> Self {
+        match err.downcast::<Self>() {
+            Ok(e) => *e,
+            Err(e) => Error::Strategy(e),
+        }
+    }
+}
+
 impl From<GlobError> for Error {
     fn from(err: GlobError) -> Self {
         Error::Glob(err)

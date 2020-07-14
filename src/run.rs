@@ -1,10 +1,15 @@
 use std::collections::BTreeMap as Map;
 use std::env;
+use std::error::Error as StdError;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
-use std::path::{Path, PathBuf};
+use std::{
+    fmt::Debug,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
-use super::{Expected, Runner, TestSpec};
+use super::{Expected, Runner, Strategy, TestSpec};
 use crate::cargo;
 use crate::dependencies::{self, Dependency};
 use crate::env::Update;
@@ -16,27 +21,75 @@ use crate::normalize::{self, Context, Variations};
 use crate::rustflags;
 
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct Project {
+    /// Source directory of the project.
+    ///
+    /// Occurrences of this are replaced with `$DIR` in compile output.
+    pub source_dir: PathBuf,
+    /// Directory of the workspace which contains this project.
+    ///
+    /// Occurrences of this are replaced with `$WORKSPACE` in compile output.
+    pub workspace: PathBuf,
+    update: Update,
+    has_pass: bool,
+    has_compile_fail: bool,
+    self_test: bool,
+}
+
+impl Project {
+    pub fn new() -> crate::Result<Self> {
+        Ok(Project {
+            source_dir: PathBuf::new(),
+            workspace: PathBuf::new(),
+            update: Update::env()?,
+            has_pass: false,
+            has_compile_fail: false,
+            self_test: false,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct CargoProject {
     pub dir: PathBuf,
-    source_dir: PathBuf,
     pub target_dir: PathBuf,
     pub name: String,
-    update: Update,
     pub has_pass: bool,
     has_compile_fail: bool,
     pub features: Option<Vec<String>>,
-    workspace: PathBuf,
 }
+
+/// The default strategy used.
+#[derive(Debug)]
+pub struct CargoStrategy(Option<CargoProject>);
+impl CargoStrategy {
+    pub fn new() -> Self {
+        Self(None)
+    }
+
+    fn project(&self) -> &CargoProject {
+        self.0.as_ref().unwrap()
+    }
+}
+
+pub type StrategyResult<T> = std::result::Result<T, Box<dyn StdError + 'static>>;
 
 impl Runner {
     pub fn run(&mut self) {
         let mut tests = expand_globs(&self.tests);
         filter(&mut tests);
 
-        let project = self.prepare(&tests).unwrap_or_else(|err| {
-            message::prepare_fail(err);
+        let mut project = self.strategy.prepare(&tests).unwrap_or_else(|err| {
+            message::prepare_fail(err.into());
             panic!("tests failed");
         });
+        for e in &tests {
+            match e.spec.expected {
+                Expected::Pass => project.has_pass = true,
+                Expected::CompileFail => project.has_compile_fail = true,
+            }
+        }
 
         print!("\n\n");
 
@@ -47,7 +100,7 @@ impl Runner {
             message::no_tests_enabled();
         } else {
             for test in tests {
-                if let Err(err) = test.run(&project) {
+                if let Err(err) = test.run(&project, &*self.strategy) {
                     failures += 1;
                     message::test_fail(err);
                 }
@@ -56,12 +109,14 @@ impl Runner {
 
         print!("\n\n");
 
-        if failures > 0 && project.name != "trybuild-tests" {
+        if failures > 0 && !project.self_test {
             panic!("{} of {} tests failed", failures, len);
         }
     }
+}
 
-    fn prepare(&self, tests: &[Test]) -> Result<Project> {
+impl Strategy for CargoStrategy {
+    fn prepare(&mut self, tests: &[Test]) -> StrategyResult<Project> {
         let metadata = cargo::metadata()?;
         let target_dir = metadata.target_directory;
         let workspace = metadata.workspace_root;
@@ -83,42 +138,59 @@ impl Runner {
 
         let features = features::find();
 
-        let mut project = Project {
+        let mut cargo = CargoProject {
             dir: path!(target_dir / "tests" / crate_name),
-            source_dir,
             target_dir,
             name: format!("{}-tests", crate_name),
-            update: Update::env()?,
             has_pass,
             has_compile_fail,
             features,
+        };
+        let project = Project {
+            source_dir,
             workspace,
+            update: Update::env()?,
+            has_pass,
+            has_compile_fail,
+            self_test: crate_name == "trybuild",
         };
 
-        let manifest = self.make_manifest(crate_name, &project, tests)?;
+        let manifest = self.make_manifest(crate_name, &project, &cargo, tests)?;
         let manifest_toml = toml::to_string(&manifest)?;
 
         let config = self.make_config();
         let config_toml = toml::to_string(&config)?;
 
-        if let Some(enabled_features) = &mut project.features {
+        if let Some(enabled_features) = &mut cargo.features {
             enabled_features.retain(|feature| manifest.features.contains_key(feature));
         }
 
-        fs::create_dir_all(path!(project.dir / ".cargo"))?;
-        fs::write(path!(project.dir / ".cargo" / "config"), config_toml)?;
-        fs::write(path!(project.dir / "Cargo.toml"), manifest_toml)?;
-        fs::write(path!(project.dir / "main.rs"), b"fn main() {}\n")?;
+        fs::create_dir_all(path!(cargo.dir / ".cargo"))?;
+        fs::write(path!(cargo.dir / ".cargo" / "config"), config_toml)?;
+        fs::write(path!(cargo.dir / "Cargo.toml"), manifest_toml)?;
+        fs::write(path!(cargo.dir / "main.rs"), b"fn main() {}\n")?;
 
-        cargo::build_dependencies(&project)?;
+        cargo::build_dependencies(&cargo)?;
 
+        self.0 = Some(cargo);
         Ok(project)
     }
 
+    fn build(&self, test: &Test) -> StrategyResult<Command> {
+        cargo::build_test(self.project(), &test.name)
+    }
+
+    fn run(&self, test: &Test) -> StrategyResult<Command> {
+        cargo::run_test(self.project(), &test.name)
+    }
+}
+
+impl CargoStrategy {
     fn make_manifest(
         &self,
         crate_name: String,
         project: &Project,
+        cargo: &CargoProject,
         tests: &[Test],
     ) -> Result<Manifest> {
         let source_manifest = dependencies::get_manifest(&project.source_dir);
@@ -135,7 +207,7 @@ impl Runner {
 
         let mut manifest = Manifest {
             package: Package {
-                name: project.name.clone(),
+                name: cargo.name.clone(),
                 version: "0.0.0".to_owned(),
                 edition: source_manifest.package.edition,
                 publish: false,
@@ -166,7 +238,7 @@ impl Runner {
         );
 
         manifest.bins.push(Bin {
-            name: Name(project.name.to_owned()),
+            name: Name(cargo.name.to_owned()),
             path: Path::new("main.rs").to_owned(),
         });
 
@@ -192,12 +264,17 @@ impl Runner {
 }
 
 impl TestSpec {
-    fn run(&self, project: &Project, name: &Name) -> Result<()> {
+    fn run(&self, project: &Project, strategy: &dyn Strategy, name: &Name) -> Result<()> {
         let show_expected = project.has_pass && project.has_compile_fail;
         message::begin_test(self, show_expected);
         check_exists(&self.path)?;
 
-        let output = cargo::build_test(project, name)?;
+        let test = Test {
+            name: name.to_owned(),
+            spec: self.clone(),
+            error: None,
+        };
+        let output = strategy.build(&test)?.output().map_err(Error::Cargo)?;
         let success = output.status.success();
         let stdout = output.stdout;
         let stderr = normalize::diagnostics(
@@ -214,12 +291,13 @@ impl TestSpec {
             Expected::CompileFail => TestSpec::check_compile_fail,
         };
 
-        check(self, project, name, success, stdout, stderr)
+        check(self, project, strategy, name, success, stdout, stderr)
     }
 
     fn check_pass(
         &self,
-        project: &Project,
+        _project: &Project,
+        strategy: &dyn Strategy,
         name: &Name,
         success: bool,
         build_stdout: Vec<u8>,
@@ -231,7 +309,12 @@ impl TestSpec {
             return Err(Error::CargoFail);
         }
 
-        let mut output = cargo::run_test(project, name)?;
+        let test = Test {
+            name: name.to_owned(),
+            spec: self.clone(),
+            error: None,
+        };
+        let mut output = strategy.run(&test)?.output().map_err(Error::Cargo)?;
         output.stdout.splice(..0, build_stdout);
         message::output(preferred, &output);
         if output.status.success() {
@@ -244,6 +327,7 @@ impl TestSpec {
     fn check_compile_fail(
         &self,
         project: &Project,
+        _strategy: &dyn Strategy,
         _name: &Name,
         success: bool,
         build_stdout: Vec<u8>,
@@ -316,11 +400,30 @@ fn check_exists(path: &Path) -> Result<()> {
     }
 }
 
+/// Describes an individual test being run.
 #[derive(Debug)]
-struct Test {
+pub struct Test {
     name: Name,
     spec: TestSpec,
     error: Option<Error>,
+}
+
+impl Test {
+    /// A unique name for the crate and binary.
+    pub fn crate_name(&self) -> String {
+        self.name.0.clone()
+    }
+    /// Path to the source file.
+    pub fn path(&self) -> &Path {
+        &self.spec.path
+    }
+    /// Whether this test requires actually building and running a binary.
+    pub fn requires_run(&self) -> bool {
+        match self.spec.expected {
+            Expected::CompileFail => false,
+            Expected::Pass => true,
+        }
+    }
 }
 
 fn expand_globs(tests: &[TestSpec]) -> Vec<Test> {
@@ -371,9 +474,9 @@ fn expand_globs(tests: &[TestSpec]) -> Vec<Test> {
 }
 
 impl Test {
-    fn run(self, project: &Project) -> Result<()> {
+    fn run(self, project: &Project, strategy: &dyn Strategy) -> Result<()> {
         match self.error {
-            None => self.spec.run(project, &self.name),
+            None => self.spec.run(project, strategy, &self.name),
             Some(error) => {
                 let show_expected = false;
                 message::begin_test(&self.spec, show_expected);

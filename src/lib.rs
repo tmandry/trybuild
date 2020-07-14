@@ -227,17 +227,34 @@ mod run;
 mod rustflags;
 
 use std::cell::RefCell;
+use std::fmt::Debug;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::thread;
+
+pub use run::{CargoStrategy, Project, Test};
 
 #[derive(Debug)]
 pub struct TestCases {
     runner: RefCell<Runner>,
 }
 
+pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + 'static>>;
+
+/// Allows customizing how tests are built and run.
+pub trait Strategy: Send + Sync + Debug {
+    /// Called once, before running all tests.
+    fn prepare(&mut self, tests: &[Test]) -> Result<Project>;
+    /// Returns a command that can be executed to build the given test.
+    fn build(&self, test: &Test) -> Result<Command>;
+    /// Returns a command that can be executed to run the given test.
+    fn run(&self, test: &Test) -> Result<Command>;
+}
+
 #[derive(Debug)]
 struct Runner {
     tests: Vec<TestSpec>,
+    strategy: Box<dyn Strategy>,
 }
 
 #[derive(Clone, Debug)]
@@ -255,8 +272,15 @@ enum Expected {
 impl TestCases {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
+        Self::new_with_strategy(CargoStrategy::new())
+    }
+
+    pub fn new_with_strategy<S: Strategy + 'static>(strategy: S) -> Self {
         TestCases {
-            runner: RefCell::new(Runner { tests: Vec::new() }),
+            runner: RefCell::new(Runner {
+                tests: Vec::new(),
+                strategy: Box::new(strategy),
+            }),
         }
     }
 

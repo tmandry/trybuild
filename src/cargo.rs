@@ -1,10 +1,10 @@
 use serde::Deserialize;
 use std::path::PathBuf;
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, Stdio};
 
 use crate::error::{Error, Result};
 use crate::manifest::Name;
-use crate::run::Project;
+use crate::run::{CargoProject, StrategyResult};
 use crate::rustflags;
 
 #[derive(Deserialize)]
@@ -17,7 +17,7 @@ fn raw_cargo() -> Command {
     Command::new(option_env!("CARGO").unwrap_or("cargo"))
 }
 
-fn cargo(project: &Project) -> Command {
+fn cargo(project: &CargoProject) -> Command {
     let mut cmd = raw_cargo();
     cmd.current_dir(&project.dir);
     cmd.env(
@@ -29,7 +29,7 @@ fn cargo(project: &Project) -> Command {
     cmd
 }
 
-pub fn build_dependencies(project: &Project) -> Result<()> {
+pub fn build_dependencies(project: &CargoProject) -> Result<()> {
     let _ = cargo(project).arg("generate-lockfile").status();
 
     let status = cargo(project)
@@ -47,7 +47,7 @@ pub fn build_dependencies(project: &Project) -> Result<()> {
     }
 }
 
-pub fn build_test(project: &Project, name: &Name) -> Result<Output> {
+pub fn build_test(project: &CargoProject, name: &Name) -> StrategyResult<Command> {
     let _ = cargo(project)
         .arg("clean")
         .arg("--package")
@@ -57,27 +57,25 @@ pub fn build_test(project: &Project, name: &Name) -> Result<Output> {
         .stderr(Stdio::null())
         .status();
 
-    cargo(project)
-        .arg(if project.has_pass { "build" } else { "check" })
+    let mut cmd = cargo(project);
+    cmd.arg(if project.has_pass { "build" } else { "check" })
         .arg("--bin")
         .arg(name)
         .args(features(project))
         .arg("--quiet")
-        .arg("--color=never")
-        .output()
-        .map_err(Error::Cargo)
+        .arg("--color=never");
+    Ok(cmd)
 }
 
-pub fn run_test(project: &Project, name: &Name) -> Result<Output> {
-    cargo(project)
-        .arg("run")
+pub fn run_test(project: &CargoProject, name: &Name) -> StrategyResult<Command> {
+    let mut cmd = cargo(project);
+    cmd.arg("run")
         .arg("--bin")
         .arg(name)
         .args(features(project))
         .arg("--quiet")
-        .arg("--color=never")
-        .output()
-        .map_err(Error::Cargo)
+        .arg("--color=never");
+    Ok(cmd)
 }
 
 pub fn metadata() -> Result<Metadata> {
@@ -93,7 +91,7 @@ pub fn metadata() -> Result<Metadata> {
     })
 }
 
-fn features(project: &Project) -> Vec<String> {
+fn features(project: &CargoProject) -> Vec<String> {
     match &project.features {
         Some(features) => vec![
             "--no-default-features".to_owned(),
