@@ -96,6 +96,23 @@ fn apply(original: &str, normalization: Normalization, context: Context) -> Stri
     trim(normalized)
 }
 
+trait SmartReplace {
+    fn smart_replace(&self, pat: &str, src: &str) -> String;
+}
+impl SmartReplace for str {
+    fn smart_replace(&self, from: &str, to: &str) -> String {
+        if from.is_empty() {
+            return self.to_string();
+        }
+        self.replace(from, to)
+    }
+}
+impl SmartReplace for String {
+    fn smart_replace(&self, from: &str, to: &str) -> String {
+        <str as SmartReplace>::smart_replace(&self, from, to)
+    }
+}
+
 fn filter(line: &str, normalization: Normalization, context: Context) -> Option<String> {
     if line.trim_start().starts_with("--> ") {
         if let Some(cut_end) = line.rfind(&['/', '\\'][..]) {
@@ -106,7 +123,7 @@ fn filter(line: &str, normalization: Normalization, context: Context) -> Option<
 
     if line.trim_start().starts_with("::: ") {
         let mut line = line
-            .replace(context.workspace.to_string_lossy().as_ref(), "$WORKSPACE")
+            .smart_replace(context.workspace.to_string_lossy().as_ref(), "$WORKSPACE")
             .replace('\\', "/");
         if normalization >= RustLib {
             if let Some(pos) = line.find("/rustlib/src/rust/src/") {
@@ -156,8 +173,11 @@ fn filter(line: &str, normalization: Normalization, context: Context) -> Option<
 
     if normalization >= DirBackslash {
         // https://github.com/dtolnay/trybuild/issues/66
-        let source_dir_with_backslash = context.source_dir.to_string_lossy().into_owned() + "\\";
-        line = line.replace(&source_dir_with_backslash, "$DIR/");
+        let source_dir = context.source_dir.to_string_lossy();
+        if !source_dir.is_empty() {
+            let source_dir_with_backslash = source_dir.into_owned() + "\\";
+            line = line.replace(&source_dir_with_backslash, "$DIR/");
+        }
     }
 
     if normalization >= TrimEnd {
@@ -165,9 +185,9 @@ fn filter(line: &str, normalization: Normalization, context: Context) -> Option<
     }
 
     line = line
-        .replace(context.krate, "$CRATE")
-        .replace(context.source_dir.to_string_lossy().as_ref(), "$DIR")
-        .replace(context.workspace.to_string_lossy().as_ref(), "$WORKSPACE");
+        .smart_replace(context.krate, "$CRATE")
+        .smart_replace(context.source_dir.to_string_lossy().as_ref(), "$DIR")
+        .smart_replace(context.workspace.to_string_lossy().as_ref(), "$WORKSPACE");
 
     Some(line)
 }
