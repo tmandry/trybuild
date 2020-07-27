@@ -1,10 +1,20 @@
+use crate::{Project, Test};
 use std::path::Path;
 
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub struct Context<'a> {
-    pub krate: &'a str,
+    pub krate: String,
     pub source_dir: &'a Path,
     pub workspace: &'a Path,
+}
+impl<'a> Context<'a> {
+    fn new(project: &'a Project, test: &'a Test) -> Self {
+        Context {
+            krate: test.crate_name(),
+            source_dir: project.source_dir.as_path(),
+            workspace: project.workspace.as_path(),
+        }
+    }
 }
 
 pub fn trim<S: AsRef<[u8]>>(output: S) -> String {
@@ -21,7 +31,7 @@ pub fn trim<S: AsRef<[u8]>>(output: S) -> String {
     normalized
 }
 
-/// For a given compiler output, produces the set of saved outputs against which
+/// For a given compiler output we produce the set of saved outputs against which
 /// the compiler's output would be considered correct. If the test's saved
 /// stderr file is identical to any one of these variations, the test will pass.
 ///
@@ -32,39 +42,32 @@ pub fn trim<S: AsRef<[u8]>>(output: S) -> String {
 ///
 /// There is one "preferred" variation which is what we print when the stderr
 /// file is absent or not a match.
-pub fn diagnostics(output: Vec<u8>, context: Context) -> Variations {
-    let mut from_bytes = String::from_utf8_lossy(&output).to_string();
-    from_bytes = from_bytes.replace("\r\n", "\n");
+const VARIATIONS: &[Normalization] = &[
+    Basic,
+    StripCouldNotCompile,
+    StripCouldNotCompile2,
+    StripForMoreInformation,
+    StripForMoreInformation2,
+    DirBackslash,
+    TrimEnd,
+    RustLib,
+];
 
-    let variations = [
-        Basic,
-        StripCouldNotCompile,
-        StripCouldNotCompile2,
-        StripForMoreInformation,
-        StripForMoreInformation2,
-        DirBackslash,
-        TrimEnd,
-        RustLib,
-    ]
-    .iter()
-    .map(|normalization| apply(&from_bytes, *normalization, context))
-    .collect();
-
-    Variations { variations }
+/// Checks whether the two outputs `expected` and `actual` are
+/// considered to match.
+pub fn matches(project: &Project, test: &Test, expected: &str, actual: &str) -> bool {
+    let context = Context::new(project, test);
+    let mut variations = VARIATIONS
+        .iter()
+        .map(|normalization| apply(actual, *normalization, &context));
+    variations.any(|v| v == expected)
 }
 
-pub struct Variations {
-    variations: Vec<String>,
-}
-
-impl Variations {
-    pub fn preferred(&self) -> &str {
-        self.variations.last().unwrap()
-    }
-
-    pub fn any<F: FnMut(&str) -> bool>(&self, mut f: F) -> bool {
-        self.variations.iter().any(|stderr| f(stderr))
-    }
+/// Normalizes the rustc diagnostics in `output` and returns a version
+/// suitable for saving to a file.
+pub fn diagnostics(project: &Project, test: &Test, output: &str) -> String {
+    let context = Context::new(project, test);
+    apply(output, *VARIATIONS.last().unwrap(), &context)
 }
 
 #[derive(PartialOrd, PartialEq, Copy, Clone)]
@@ -81,7 +84,7 @@ enum Normalization {
 
 use self::Normalization::*;
 
-fn apply(original: &str, normalization: Normalization, context: Context) -> String {
+fn apply(original: &str, normalization: Normalization, context: &Context) -> String {
     let mut normalized = String::new();
 
     for line in original.lines() {
@@ -113,7 +116,7 @@ impl SmartReplace for String {
     }
 }
 
-fn filter(line: &str, normalization: Normalization, context: Context) -> Option<String> {
+fn filter(line: &str, normalization: Normalization, context: &Context) -> Option<String> {
     if line.trim_start().starts_with("--> ") {
         if let Some(cut_end) = line.rfind(&['/', '\\'][..]) {
             let cut_start = line.find('>').unwrap() + 2;
@@ -185,7 +188,7 @@ fn filter(line: &str, normalization: Normalization, context: Context) -> Option<
     }
 
     line = line
-        .smart_replace(context.krate, "$CRATE")
+        .smart_replace(&context.krate, "$CRATE")
         .smart_replace(context.source_dir.to_string_lossy().as_ref(), "$DIR")
         .smart_replace(context.workspace.to_string_lossy().as_ref(), "$WORKSPACE");
 

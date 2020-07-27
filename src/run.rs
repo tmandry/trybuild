@@ -17,7 +17,6 @@ use crate::error::{Error, Result};
 use crate::features;
 use crate::manifest::{Bin, Build, Config, Manifest, Name, Package, Workspace};
 use crate::message::{self, Fail, Warn};
-use crate::normalize::{self, Context, Variations};
 use crate::rustflags;
 
 #[derive(Debug)]
@@ -277,42 +276,37 @@ impl TestSpec {
         let output = strategy.build(&test)?.output().map_err(Error::Cargo)?;
         let success = output.status.success();
         let stdout = output.stdout;
-        let stderr = normalize::diagnostics(
-            output.stderr,
-            Context {
-                krate: &name.0,
-                source_dir: &project.source_dir,
-                workspace: &project.workspace,
-            },
-        );
+
+        let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        stderr = stderr.replace("\r\n", "\n");
+
+        let test = Test {
+            name: name.to_owned(),
+            spec: self.clone(),
+            error: None,
+        };
 
         let check = match self.expected {
             Expected::Pass => TestSpec::check_pass,
             Expected::CompileFail => TestSpec::check_compile_fail,
         };
 
-        check(self, project, strategy, name, success, stdout, stderr)
+        check(self, project, strategy, test, success, stdout, stderr)
     }
 
     fn check_pass(
         &self,
-        _project: &Project,
+        project: &Project,
         strategy: &dyn Strategy,
-        name: &Name,
+        test: Test,
         success: bool,
         build_stdout: Vec<u8>,
-        variations: Variations,
+        build_stderr: String,
     ) -> Result<()> {
-        let preferred = variations.preferred();
+        let preferred = &strategy.normalize(project, &test, &build_stderr);
         if !success {
             message::failed_to_build(preferred);
             return Err(Error::CargoFail);
-        }
-
-        let test = Test {
-            name: name.to_owned(),
-            spec: self.clone(),
-            error: None,
         };
         let mut output = strategy.run(&test)?.output().map_err(Error::Cargo)?;
         output.stdout.splice(..0, build_stdout);
@@ -327,13 +321,13 @@ impl TestSpec {
     fn check_compile_fail(
         &self,
         project: &Project,
-        _strategy: &dyn Strategy,
-        _name: &Name,
+        strategy: &dyn Strategy,
+        test: Test,
         success: bool,
         build_stdout: Vec<u8>,
-        variations: Variations,
+        build_stderr: String,
     ) -> Result<()> {
-        let preferred = variations.preferred();
+        let preferred = &strategy.normalize(project, &test, &build_stderr);
 
         if success {
             message::should_not_have_compiled();
@@ -371,7 +365,7 @@ impl TestSpec {
             .map_err(Error::ReadStderr)?
             .replace("\r\n", "\n");
 
-        if variations.any(|stderr| expected == stderr) {
+        if strategy.matches(project, &test, &expected, &build_stderr) {
             message::ok();
             return Ok(());
         }

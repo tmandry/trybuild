@@ -249,6 +249,30 @@ pub trait Strategy: Send + Sync + Debug {
     fn build(&self, test: &Test) -> Result<Command>;
     /// Returns a command that can be executed to run the given test.
     fn run(&self, test: &Test) -> Result<Command>;
+
+    /// Normalizes the diagnostics in `output` and returns a version
+    /// suitable for saving to a file.
+    ///
+    /// In most cases, this should call [`normalize::diagnostics`]
+    /// with the supplied output.
+    fn normalize(&self, project: &Project, test: &Test, output: &str) -> String {
+        normalize::diagnostics(project, test, output)
+    }
+
+    /// Checks whether the two outputs `expected` and `actual` are
+    /// considered to match.
+    ///
+    /// This does not have to be a simple string comparison, and in many cases
+    /// it shouldn't be. For example, the default behavior is to normalize the
+    /// `expected` output (the `actual` output will already have been normalized)
+    /// using the current and past versions of the normalization algorithm, and
+    /// check if any of those match.
+    ///
+    /// In most cases, this should call [`normalize::matches`] with the
+    /// supplied arguments.
+    fn matches(&self, project: &Project, test: &Test, expected: &str, actual: &str) -> bool {
+        normalize::matches(project, test, expected, actual)
+    }
 }
 
 #[derive(Debug)]
